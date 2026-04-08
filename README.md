@@ -1,6 +1,6 @@
 # fleet-search
 
-Search across all vessel documentation, code, and configs
+Search across all vessel docs and code
 
 Part of the [Cocapn fleet](https://github.com/Lucineer/the-fleet).
 

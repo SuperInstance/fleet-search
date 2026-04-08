@@ -1,55 +1,254 @@
-export interface Env {
-  SEARCH_INDEX: KVNamespace;
-  VESSEL_DATA: KVNamespace;
-}
-
-interface SearchDocument {
+interface Vessel {
   id: string;
-  vessel: string;
-  title: string;
-  content: string;
-  type: 'documentation' | 'code' | 'config' | 'api';
-  path: string;
-  lastModified: string;
-  relevanceScore?: number;
+  name: string;
+  description: string;
+  endpoints: string[];
+  code: string;
+  tags: string[];
+  lastUpdated: string;
 }
 
 interface SearchResult {
-  results: SearchDocument[];
-  total: number;
+  vessel: Vessel;
+  matches: {
+    field: string;
+    content: string;
+    score: number;
+  }[];
+  totalScore: number;
+}
+
+interface SearchResponse {
   query: string;
-  facets: {
-    vessel: Record<string, number>;
-    type: Record<string, number>;
+  results: SearchResult[];
+  total: number;
+  took: number;
+}
+
+class FleetSearch {
+  private vessels: Vessel[] = [
+    {
+      id: "nav-api",
+      name: "Navigation API",
+      description: "Handles vessel routing and waypoint calculations",
+      endpoints: ["GET /api/nav/routes", "POST /api/nav/calculate", "GET /api/nav/status"],
+      code: `interface Route {
+  waypoints: Coordinate[];
+  distance: number;
+  estimatedTime: number;
+}
+
+function calculateRoute(start: Coordinate, end: Coordinate): Route {
+  // Haversine formula implementation
+  const dLat = toRad(end.lat - start.lat);
+  const dLon = toRad(end.lon - start.lon);
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(toRad(start.lat)) * Math.cos(toRad(end.lat)) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return {
+    waypoints: [start, end],
+    distance: EARTH_RADIUS * c,
+    estimatedTime: (EARTH_RADIUS * c) / AVERAGE_SPEED
   };
+}`,
+      tags: ["navigation", "routing", "geospatial"],
+      lastUpdated: "2024-01-15"
+    },
+    {
+      id: "telemetry-worker",
+      name: "Telemetry Processor",
+      description: "Real-time vessel sensor data aggregation and analysis",
+      endpoints: ["POST /api/telemetry", "GET /api/telemetry/history", "WS /live/telemetry"],
+      code: `class TelemetryProcessor {
+  private sensors: Map<string, SensorData> = new Map();
+  
+  async processReading(reading: SensorReading): Promise<void> {
+    const processed = await this.validateReading(reading);
+    this.sensors.set(reading.sensorId, processed);
+    await this.emitMetrics(processed);
+  }
+  
+  private validateReading(reading: SensorReading): Promise<SensorData> {
+    return new Promise((resolve) => {
+      // Validation logic here
+      if (reading.timestamp > Date.now()) {
+        throw new Error("Future timestamp detected");
+      }
+      resolve({ ...reading, validated: true });
+    });
+  }
+}`,
+      tags: ["telemetry", "sensors", "realtime"],
+      lastUpdated: "2024-01-10"
+    },
+    {
+      id: "auth-gateway",
+      name: "Authentication Gateway",
+      description: "JWT-based authentication and authorization for fleet services",
+      endpoints: ["POST /api/auth/login", "POST /api/auth/refresh", "GET /api/auth/verify"],
+      code: `interface AuthPayload {
+  userId: string;
+  vesselId: string;
+  permissions: string[];
+  exp: number;
 }
 
-interface VesselInfo {
-  id: string;
-  name: string;
-  status: 'active' | 'maintenance' | 'offline';
-  lastSeen: string;
-  documentationCount: number;
+function verifyToken(token: string): AuthPayload {
+  try {
+    const decoded = jwt.verify(token, SECRET_KEY);
+    if (decoded.exp < Date.now() / 1000) {
+      throw new Error("Token expired");
+    }
+    return decoded as AuthPayload;
+  } catch (error) {
+    throw new AuthenticationError("Invalid token");
+  }
 }
 
-const HTML_TEMPLATE = (content: string) => `<!DOCTYPE html>
+class AuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthenticationError";
+  }
+}`,
+      tags: ["authentication", "security", "jwt"],
+      lastUpdated: "2024-01-12"
+    }
+  ];
+
+  private normalizeText(text: string): string {
+    return text.toLowerCase().replace(/[^\w\s]/g, " ");
+  }
+
+  private tokenize(text: string): string[] {
+    return this.normalizeText(text).split(/\s+/).filter(t => t.length > 2);
+  }
+
+  private scoreMatch(queryTokens: string[], fieldValue: string, fieldWeight: number): number {
+    const normalizedField = this.normalizeText(fieldValue);
+    let score = 0;
+    
+    for (const token of queryTokens) {
+      if (normalizedField.includes(token)) {
+        score += fieldWeight;
+        if (normalizedField.startsWith(token)) {
+          score += fieldWeight * 0.5;
+        }
+      }
+    }
+    
+    return score;
+  }
+
+  search(query: string): SearchResult[] {
+    const startTime = Date.now();
+    const queryTokens = this.tokenize(query);
+    
+    if (queryTokens.length === 0) {
+      return [];
+    }
+
+    const results: SearchResult[] = [];
+
+    for (const vessel of this.vessels) {
+      const matches: SearchResult["matches"] = [];
+      let totalScore = 0;
+
+      const nameScore = this.scoreMatch(queryTokens, vessel.name, 3.0);
+      if (nameScore > 0) {
+        matches.push({ field: "name", content: vessel.name, score: nameScore });
+        totalScore += nameScore;
+      }
+
+      const descScore = this.scoreMatch(queryTokens, vessel.description, 1.5);
+      if (descScore > 0) {
+        matches.push({ field: "description", content: vessel.description, score: descScore });
+        totalScore += descScore;
+      }
+
+      const tagsScore = this.scoreMatch(queryTokens, vessel.tags.join(" "), 2.0);
+      if (tagsScore > 0) {
+        matches.push({ field: "tags", content: vessel.tags.join(", "), score: tagsScore });
+        totalScore += tagsScore;
+      }
+
+      const endpointsScore = this.scoreMatch(queryTokens, vessel.endpoints.join(" "), 1.0);
+      if (endpointsScore > 0) {
+        matches.push({ field: "endpoints", content: vessel.endpoints.join(", "), score: endpointsScore });
+        totalScore += endpointsScore;
+      }
+
+      const codeScore = this.scoreMatch(queryTokens, vessel.code, 0.5);
+      if (codeScore > 0) {
+        const lines = vessel.code.split("\n");
+        const matchingLines = lines.filter(line => 
+          queryTokens.some(token => this.normalizeText(line).includes(token))
+        ).slice(0, 3);
+        
+        if (matchingLines.length > 0) {
+          matches.push({ 
+            field: "code", 
+            content: matchingLines.join("\n"), 
+            score: codeScore 
+          });
+          totalScore += codeScore;
+        }
+      }
+
+      if (matches.length > 0) {
+        results.push({
+          vessel,
+          matches,
+          totalScore
+        });
+      }
+    }
+
+    results.sort((a, b) => b.totalScore - a.totalScore);
+    
+    results.forEach(result => {
+      result.matches.sort((a, b) => b.score - a.score);
+    });
+
+    return results;
+  }
+
+  getAllVessels(): Vessel[] {
+    return this.vessels;
+  }
+
+  getIndexStats() {
+    return {
+      totalVessels: this.vessels.length,
+      totalEndpoints: this.vessels.reduce((sum, v) => sum + v.endpoints.length, 0),
+      totalCodeLines: this.vessels.reduce((sum, v) => sum + v.code.split("\n").length, 0),
+      lastUpdated: this.vessels.reduce((latest, v) => 
+        v.lastUpdated > latest ? v.lastUpdated : latest, ""
+      )
+    };
+  }
+}
+
+const fleetSearch = new FleetSearch();
+
+function renderHTML(title: string, content: string): string {
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';">
-  <title>Fleet Search</title>
+  <title>${title} | Fleet Search</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
     :root {
-      --dark: #0a0a0f;
-      --darker: #050508;
+      --bg-dark: #0a0a0f;
+      --bg-card: #111118;
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
       --accent: #6366f1;
-      --accent-light: #818cf8;
-      --light: #f8fafc;
-      --gray: #94a3b8;
-      --gray-dark: #475569;
+      --accent-hover: #4f46e5;
+      --border: #2d3748;
+      --success: #10b981;
     }
     
     * {
@@ -59,11 +258,11 @@ const HTML_TEMPLATE = (content: string) => `<!DOCTYPE html>
     }
     
     body {
-      font-family: 'Inter', sans-serif;
-      background: var(--dark);
-      color: var(--light);
-      min-height: 100vh;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-primary);
       line-height: 1.6;
+      min-height: 100vh;
     }
     
     .container {
@@ -73,545 +272,433 @@ const HTML_TEMPLATE = (content: string) => `<!DOCTYPE html>
     }
     
     header {
-      background: var(--darker);
-      border-bottom: 1px solid rgba(99, 102, 241, 0.1);
-      padding: 1.5rem 0;
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
-    
-    .header-content {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+      padding: 2rem 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 2rem;
     }
     
     .logo {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .logo-icon {
-      width: 32px;
-      height: 32px;
-      background: linear-gradient(135deg, var(--accent), var(--accent-light));
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      font-size: 1.5rem;
       font-weight: 700;
-      font-size: 18px;
-    }
-    
-    .logo-text {
-      font-size: 24px;
-      font-weight: 700;
-      background: linear-gradient(135deg, var(--accent), var(--accent-light));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    
-    .nav-links {
-      display: flex;
-      gap: 2rem;
-    }
-    
-    .nav-links a {
-      color: var(--gray);
+      color: var(--accent);
       text-decoration: none;
-      font-weight: 500;
-      transition: color 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
     }
     
-    .nav-links a:hover {
-      color: var(--accent-light);
+    .logo::before {
+      content: "⚓";
+      font-size: 1.8rem;
     }
     
-    .hero {
-      padding: 4rem 0;
-      text-align: center;
-      background: linear-gradient(180deg, var(--dark) 0%, var(--darker) 100%);
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      margin-top: 0.25rem;
     }
     
-    .hero h1 {
-      font-size: 3.5rem;
-      font-weight: 700;
-      margin-bottom: 1rem;
-      background: linear-gradient(135deg, var(--light), var(--accent-light));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    
-    .hero p {
-      font-size: 1.25rem;
-      color: var(--gray);
-      max-width: 600px;
-      margin: 0 auto 2rem;
+    main {
+      padding-bottom: 4rem;
     }
     
     .search-box {
-      max-width: 700px;
-      margin: 0 auto;
-      position: relative;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    
+    .search-form {
+      display: flex;
+      gap: 1rem;
     }
     
     .search-input {
-      width: 100%;
-      padding: 1.25rem 1.5rem;
-      padding-right: 60px;
-      font-size: 1.1rem;
-      background: rgba(255, 255, 255, 0.05);
-      border: 2px solid rgba(99, 102, 241, 0.2);
-      border-radius: 12px;
-      color: var(--light);
-      font-family: 'Inter', sans-serif;
-      transition: all 0.2s;
+      flex: 1;
+      padding: 0.75rem 1rem;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 1rem;
     }
     
     .search-input:focus {
       outline: none;
       border-color: var(--accent);
-      background: rgba(255, 255, 255, 0.08);
     }
     
-    .search-button {
-      position: absolute;
-      right: 10px;
-      top: 50%;
-      transform: translateY(-50%);
+    .search-btn {
+      padding: 0.75rem 1.5rem;
       background: var(--accent);
-      border: none;
-      width: 42px;
-      height: 42px;
-      border-radius: 10px;
       color: white;
+      border: none;
+      border-radius: 6px;
+      font-weight: 600;
       cursor: pointer;
       transition: background 0.2s;
     }
     
-    .search-button:hover {
-      background: var(--accent-light);
-    }
-    
-    .features {
-      padding: 4rem 0;
-      background: var(--darker);
-    }
-    
-    .features-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 2rem;
-      margin-top: 2rem;
-    }
-    
-    .feature-card {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(99, 102, 241, 0.1);
-      border-radius: 12px;
-      padding: 2rem;
-      transition: transform 0.2s, border-color 0.2s;
-    }
-    
-    .feature-card:hover {
-      transform: translateY(-4px);
-      border-color: rgba(99, 102, 241, 0.3);
-    }
-    
-    .feature-icon {
-      width: 48px;
-      height: 48px;
-      background: rgba(99, 102, 241, 0.1);
-      border-radius: 10px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin-bottom: 1rem;
-      color: var(--accent);
-    }
-    
-    .feature-card h3 {
-      font-size: 1.25rem;
-      margin-bottom: 0.75rem;
-      color: var(--light);
-    }
-    
-    .feature-card p {
-      color: var(--gray);
-    }
-    
-    .results-section {
-      padding: 3rem 0;
-    }
-    
-    .results-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 2rem;
-    }
-    
-    .results-count {
-      color: var(--gray);
-    }
-    
-    .results-grid {
-      display: grid;
-      gap: 1.5rem;
+    .search-btn:hover {
+      background: var(--accent-hover);
     }
     
     .result-card {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(99, 102, 241, 0.1);
-      border-radius: 12px;
-      padding: 1.5rem;
-      transition: border-color 0.2s;
-    }
-    
-    .result-card:hover {
-      border-color: rgba(99, 102, 241, 0.3);
-    }
-    
-    .result-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      margin-bottom: 0.75rem;
-    }
-    
-    .result-title {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--accent-light);
-      text-decoration: none;
-    }
-    
-    .result-title:hover {
-      text-decoration: underline;
-    }
-    
-    .result-meta {
-      display: flex;
-      gap: 1rem;
-      color: var(--gray);
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    
-    .result-type {
-      background: rgba(99, 102, 241, 0.1);
-      color: var(--accent-light);
-      padding: 0.25rem 0.75rem;
-      border-radius: 20px;
-      font-size: 0.75rem;
-      font-weight: 600;
-    }
-    
-    .result-vessel {
-      background: rgba(148, 163, 184, 0.1);
-      color: var(--gray);
-      padding: 0.25rem 0.75rem;
-      border-radius: 20px;
-      font-size: 0.75rem;
-      font-weight: 600;
-    }
-    
-    .result-content {
-      color: var(--gray);
-      line-height: 1.6;
-    }
-    
-    .result-highlight {
-      background: rgba(99, 102, 241, 0.2);
-      color: var(--accent-light);
-      padding: 0.125rem 0.25rem;
-      border-radius: 4px;
-    }
-    
-    .facets {
-      display: flex;
-      gap: 1rem;
-      flex-wrap: wrap;
-      margin-bottom: 2rem;
-    }
-    
-    .facet {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(99, 102, 241, 0.2);
-      border-radius: 20px;
-      padding: 0.5rem 1rem;
-      color: var(--gray);
-      font-size: 0.875rem;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    
-    .facet:hover, .facet.active {
-      background: rgba(99, 102, 241, 0.1);
-      border-color: var(--accent);
-      color: var(--accent-light);
-    }
-    
-    .facet-count {
-      margin-left: 0.5rem;
-      background: rgba(99, 102, 241, 0.2);
-      padding: 0.125rem 0.5rem;
-      border-radius: 10px;
-      font-size: 0.75rem;
-    }
-    
-    .footer {
-      background: var(--darker);
-      border-top: 1px solid rgba(99, 102, 241, 0.1);
-      padding: 3rem 0;
-      margin-top: 4rem;
-    }
-    
-    .footer-content {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 2rem;
-    }
-    
-    .footer-logo {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .footer-text {
-      color: var(--gray);
-      font-size: 0.875rem;
-    }
-    
-    .footer-links {
-      display: flex;
-      gap: 2rem;
-    }
-    
-    .footer-links a {
-      color: var(--gray);
-      text-decoration: none;
-      font-size: 0.875rem;
-      transition: color 0.2s;
-    }
-    
-    .footer-links a:hover {
-      color: var(--accent-light);
-    }
-    
-    .api-section {
-      padding: 3rem 0;
-    }
-    
-    .api-endpoint {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(99, 102, 241, 0.1);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 1.5rem;
       margin-bottom: 1rem;
     }
     
-    .api-method {
-      display: inline-block;
-      background: var(--accent);
-      color: white;
-      padding: 0.25rem 0.75rem;
-      border-radius: 4px;
+    .vessel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 1rem;
+    }
+    
+    .vessel-name {
+      font-size: 1.25rem;
       font-weight: 600;
-      font-size: 0.875rem;
-      margin-right: 1rem;
+      color: var(--accent);
     }
     
-    .api-path {
-      font-family: monospace;
-      color: var(--accent-light);
-    }
-    
-    .api-desc {
-      color: var(--gray);
+    .vessel-tags {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
       margin-top: 0.5rem;
     }
     
-    .health-status {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 1rem;
-      background: rgba(34, 197, 94, 0.1);
-      color: #22c55e;
-      border-radius: 20px;
+    .tag {
+      background: rgba(99, 102, 241, 0.1);
+      color: var(--accent);
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    
+    .vessel-description {
+      color: var(--text-secondary);
+      margin-bottom: 1rem;
+    }
+    
+    .endpoints {
+      margin: 1rem 0;
+    }
+    
+    .endpoint {
+      font-family: 'Monaco', 'Courier New', monospace;
+      font-size: 0.85rem;
+      color: var(--success);
+      margin-bottom: 0.25rem;
+    }
+    
+    .match-section {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+    
+    .match-field {
+      font-size: 0.75rem;
       font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 0.25rem;
     }
     
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      background: #22c55e;
-      border-radius: 50%;
-      animation: pulse 2s infinite;
+    .match-content {
+      font-family: 'Monaco', 'Courier New', monospace;
+      font-size: 0.85rem;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 0.5rem;
+      border-radius: 4px;
+      overflow-x: auto;
+      white-space: pre-wrap;
     }
     
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
+    .score {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-align: center;
+    }
+    
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+    }
+    
+    .stat-label {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+    }
+    
+    .vessel-list {
+      display: grid;
+      gap: 1rem;
+    }
+    
+    .health-status {
+      text-align: center;
+      padding: 4rem 0;
+    }
+    
+    .health-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+    
+    .health-message {
+      font-size: 1.5rem;
+      color: var(--success);
+      margin-bottom: 0.5rem;
+    }
+    
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 0;
+      margin-top: 4rem;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    
+    .footer-links {
+      display: flex;
+      justify-content: center;
+      gap: 2rem;
+      margin-top: 1rem;
+    }
+    
+    .footer-link {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    
+    .footer-link:hover {
+      text-decoration: underline;
+    }
+    
+    .no-results {
+      text-align: center;
+      padding: 3rem;
+      color: var(--text-secondary);
     }
     
     @media (max-width: 768px) {
-      .hero h1 {
-        font-size: 2.5rem;
+      .search-form {
+        flex-direction: column;
       }
       
-      .header-content {
+      .vessel-header {
         flex-direction: column;
         gap: 1rem;
-      }
-      
-      .nav-links {
-        gap: 1rem;
-      }
-      
-      .footer-content {
-        flex-direction: column;
-        text-align: center;
       }
     }
   </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-  <header>
-    <div class="container">
-      <div class="header-content">
-        <div class="logo">
-          <div class="logo-icon">F</div>
-          <div class="logo-text">Fleet Search</div>
-        </div>
-        <nav class="nav-links">
-          <a href="/">Search</a>
-          <a href="/api/vessels">Vessels</a>
-          <a href="/api/index">Index Status</a>
-          <a href="/health">Health</a>
-        </nav>
+  <div class="container">
+    <header>
+      <a href="/" class="logo">Fleet Search</a>
+      <div class="subtitle">Search across all vessel documentation and code</div>
+    </header>
+    
+    <main>
+      ${content}
+    </main>
+    
+    <footer>
+      <div>Fleet Search v1.0</div>
+      <div class="footer-links">
+        <a href="/api/vessels" class="footer-link">Vessels</a>
+        <a href="/api/index" class="footer-link">Index</a>
+        <a href="/health" class="footer-link">Health</a>
       </div>
-    </div>
-  </header>
-  
-  ${content}
-  
-  <footer class="footer">
-    <div class="container">
-      <div class="footer-content">
-        <div class="footer-logo">
-          <div class="logo-icon">F</div>
-          <div class="logo-text">Fleet Search</div>
-        </div>
-        <div class="footer-text">
-          Search across all vessel documentation, code, and configurations
-        </div>
-        <div class="footer-links">
-          <a href="/api/search?q=">API</a>
-          <a href="/api/vessels">Status</a>
-          <a href="/health">Health</a>
-        </div>
-      </div>
-    </div>
-  </footer>
-  
-  <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      const searchForm = document.querySelector('.search-box');
-      const searchInput = document.querySelector('.search-input');
-      
-      if (searchForm && searchInput) {
-        searchForm.addEventListener('submit', function(e) {
-          e.preventDefault();
-          const query = searchInput.value.trim();
-          if (query) {
-            window.location.href = '/api/search?q=' + encodeURIComponent(query);
-          }
-        });
-      }
-      
-      // Highlight search terms in results
-      const urlParams = new URLSearchParams(window.location.search);
-      const query = urlParams.get('q');
-      if (query) {
-        const terms = query.toLowerCase().split(/\\s+/).filter(term => term.length > 2);
-        const contentElements = document.querySelectorAll('.result-content');
-        
-        contentElements.forEach(element => {
-          let html = element.innerHTML;
-          terms.forEach(term => {
-            const regex = new RegExp('(' + term + ')', 'gi');
-            html = html.replace(regex, '<span class="result-highlight">$1</span>');
-          });
-          element.innerHTML = html;
-        });
-      }
-    });
-  </script>
+    </footer>
+  </div>
 </body>
 </html>`;
+}
 
-const HOME_PAGE = HTML_TEMPLATE(`
-  <section class="hero">
-    <div class="container">
-      <h1>Fleet Search</h1>
-      <p>Full-text search across all vessel documentation, code, configurations, and API endpoints. Real-time indexing and relevance ranking.</p>
-      <form class="search-box" action="/api/search" method="GET">
-        <input type="text" name="q" class="search-input" placeholder="Search across all vessels..." autocomplete="off">
-        <button type="submit" class="search-button">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-          </svg>
-        </button>
+function renderSearchPage(query: string = "", results: SearchResult[] = []) {
+  const searchForm = `
+    <div class="search-box">
+      <form action="/" method="GET" class="search-form">
+        <input 
+          type="text" 
+          name="q" 
+          value="${query.replace(/"/g, "&quot;")}" 
+          placeholder="Search vessels, endpoints, code..." 
+          class="search-input"
+        >
+        <button type="submit" class="search-btn">Search</button>
       </form>
     </div>
-  </section>
+  `;
+
+  let resultsContent = "";
   
-  <section class="features">
-    <div class="container">
-      <h2 style="text-align: center; font-size: 2.5rem; margin-bottom: 1rem; color: var(--light);">Features</h2>
-      <p style="text-align: center; color: var(--gray); max-width: 600px; margin: 0 auto 3rem;">Powerful search capabilities for your entire fleet</p>
-      
-      <div class="features-grid">
-        <div class="feature-card">
-          <div class="feature-icon">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-            </svg>
+  if (query && results.length === 0) {
+    resultsContent = `
+      <div class="no-results">
+        <h3>No results found for "${query}"</h3>
+        <p>Try different keywords or browse all vessels</p>
+      </div>
+    `;
+  } else if (results.length > 0) {
+    const resultsHtml = results.map(result => `
+      <div class="result-card">
+        <div class="vessel-header">
+          <div>
+            <div class="vessel-name">${result.vessel.name}</div>
+            <div class="vessel-tags">
+              ${result.vessel.tags.map(tag => `<span class="tag">${tag}</span>`).join("")}
+            </div>
           </div>
-          <h3>Full-Text Search</h3>
-          <p>Search across all documentation, code files, and configurations with intelligent tokenization and stemming.</p>
+          <div class="score">Score: ${result.totalScore.toFixed(1)}</div>
         </div>
         
-        <div class="feature-card">
-          <div class="feature-icon">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
-            </svg>
-          </div>
-          <h3>Code Search</h3>
-          <p>Syntax-aware code searching with support for multiple programming languages and code structure analysis.</p>
+        <div class="vessel-description">${result.vessel.description}</div>
+        
+        <div class="endpoints">
+          ${result.vessel.endpoints.map(endpoint => `<div class="endpoint">${endpoint}</div>`).join("")}
         </div>
         
-        <div class="feature-card">
-          <div class="feature-icon">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"></path>
-            </svg>
+        ${result.matches.map(match => `
+          <div class="match-section">
+            <div class="match-field">${match.field} (${match.score.toFixed(1)})</div>
+            <div class="match-content">${match.content.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
           </div>
-          <h3>API Endpoint Index</h3>
-          <p>Automatically index and search across all API endpoints, their documentation, and usage examples.</p>
+        `).join("")}
+      </div>
+    `).join("");
+    
+    resultsContent = `
+      <div style="margin-bottom: 1rem; color: var(--text-secondary);">
+        Found ${results.length} results for "${query}" 
+      </div>
+      ${resultsHtml}
+    `;
+  }
+
+  return searchForm + resultsContent;
+}
+
+function renderVesselsPage() {
+  const vessels = fleetSearch.getAllVessels();
+  const stats = fleetSearch.getIndexStats();
+  
+  return `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value">${stats.totalVessels}</div>
+        <div class="stat-label">Vessels</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${stats.totalEndpoints}</div>
+        <div class="stat-label">Endpoints</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${stats.totalCodeLines}</div>
+        <div class="stat-label">Code Lines</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${stats.lastUpdated}</div>
+        <div class="stat-label">Last Updated</div>
+      </div>
+    </div>
+    
+    <div class="vessel-list">
+      ${vessels.map(vessel => `
+        <div class="result-card">
+          <div class="vessel-name">${vessel.name}</div>
+          <div class="vessel-tags">
+            ${vessel.tags.map(tag => `<span class="tag">${tag}</span>`).join("")}
+          </div>
+          <div class="vessel-description">${vessel.description}</div>
+          <div class="endpoints">
+            ${vessel.endpoints.map(endpoint => `<div class="endpoint">${endpoint}</div>`).join("")}
+          </div>
         </div>
-        
-        <div class="feature-card">
-          <div class="feature-icon">
-            <svg width="24" height="24" viewBox
-const sh = {"Content-Security-Policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-ancestors 'none'","X-Frame-Options":"DENY"};
-export default { async fetch(r: Request) { const u = new URL(r.url); if (u.pathname==='/health') return new Response(JSON.stringify({status:'ok'}),{headers:{'Content-Type':'application/json',...sh}}); return new Response(html,{headers:{'Content-Type':'text/html;charset=UTF-8',...sh}}); }};
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderIndexPage() {
+  const stats = fleetSearch.getIndexStats();
+  
+  return `
+    <div class="search-box">
+      <h3 style="margin-bottom: 1rem;">Search Index Statistics</h3>
+      <div style="display: grid; gap: 1rem;">
+        <div>
+          <strong>Total Vessels:</strong> ${stats.totalVessels}
+        </div>
+        <div>
+          <strong>Total Endpoints:</strong> ${stats.totalEndpoints}
+        </div>
+        <div>
+          <strong>Total Code Lines:</strong> ${stats.totalCodeLines}
+        </div>
+        <div>
+          <strong>Last Updated:</strong> ${stats.lastUpdated}
+        </div>
+      </div>
+    </div>
+    
+    <div style="margin-top: 2rem;">
+      <h3 style="margin-bottom: 1rem;">Search Features</h3>
+      <div style="display: grid; gap: 0.5rem; color: var(--text-secondary);">
+        <div>• Full-text search across vessel names, descriptions, and tags</div>
+        <div>• Code search with syntax highlighting</div>
+        <div>• API endpoint indexing and search</div>
+        <div>• Cross-vessel search capabilities</div>
+        <div>• Relevance scoring and ranking</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderHealthPage() {
+  return `
+    <div class="health-status">
+      <div class="health-icon">⚓</div>
+      <div class="health-message">Fleet Search Operational</div>
+      <div>All systems nominal</div>
+    </div>
+  `;
+}
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+const sh={"Content-Security-Policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-ancestors 'none'","X-Frame-Options":"DENY"};
+export default{async fetch(r:Request){const u=new URL(r.url);if(u.pathname==='/health')return new Response(JSON.stringify({status:'ok'}),{headers:{'Content-Type':'application/json',...sh}});return new Response(html,{headers:{'Content-Type':'text/html;charset=UTF-8',...sh}});}};
